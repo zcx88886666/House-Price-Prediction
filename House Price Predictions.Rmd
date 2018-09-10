@@ -1,8 +1,11 @@
 ---
 title: "House Price Precictions R Notebook"
 output:
+  html_document:
+    df_print: paged
   html_notebook: default
   pdf_document: default
+  word_document: default
 ---
 
 # load libraries
