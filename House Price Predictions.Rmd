@@ -15,6 +15,7 @@ library(ggplot2)
 library(plyr)
 library(dplyr)
 library(corrplot)
+library(caret)
 library(gridExtra)
 library(scales)
 library(Rmisc)
@@ -76,5 +77,660 @@ cor_numVar <- cor_numVar[CorHigh, CorHigh]
 
 corrplot.mixed(cor_numVar, tl.col = "black", tl.pos = "lt")
 
+```
+
+In the remainder of this section, I will visualize the relation between SalePrice and the two predictors with the highest correlation with SalePrice; Overall Quality and the ‘Above Grade’ Living Area (this is the proportion of the house that is not in a basement; link). It also becomes clear the multicollinearity is an issue. For example: the correlation between GarageCars and GarageArea is very high (0.89), and both have similar (high) correlations with SalePrice. The other 6 six variables with a correlation higher than 0.5 with SalePrice are: -TotalBsmtSF: Total square feet of basement area -1stFlrSF: First Floor square feet -FullBath: Full bathrooms above grade -TotRmsAbvGrd: Total rooms above grade (does not include bathrooms) -YearBuilt: Original construction date -YearRemodAdd: Remodel date (same as construction date if no remodeling or additions)
+
+###Overall Quality
+Overall Quality has the highest correlation with SalePrice among the numeric variables (0.79). It rates the overall material and finish of the house on a scale from 1 (very poor) to 10 (very excellent).
+
+```{r}
+ggplot(data=all[!is.na(all$SalePrice),], aes(x=factor(OverallQual), y=SalePrice))+
+        geom_boxplot(col='blue') + labs(x='Overall Quality') +
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma)
+```
+
+The positive correlation is certainly there indeed, and seems to be a slightly upward curve. Regarding outliers, I do not see any extreme values. If there is a candidate to take out as an outlier later on, it seems to be the expensive house with grade 4.
+
+```{r}
+ggplot(data=all[!is.na(all$SalePrice),], aes(x=GrLivArea, y=SalePrice))+
+        geom_point(col='blue') + geom_smooth(method = "lm", se=FALSE, color="black", aes(group=1)) +
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_text_repel(aes(label = ifelse(all$GrLivArea[!is.na(all$SalePrice)]>4500, rownames(all), '')))
+```
+
+Especially the two houses with really big living areas and low SalePrices seem outliers (houses 524 and 1299, see labels in graph). I will not take them out yet, as taking outliers can be dangerous. For instance, a low score on the Overall Quality could explain a low price. However, as you can see below, these two houses actually also score maximum points on Overall Quality. Therefore, I will keep houses 1299 and 524 in mind as prime candidates to take out as outliers.
+
+```{r}
+all[c(524, 1299), c('SalePrice', 'GrLivArea', 'OverallQual')]
+```
+
+## Missing data, label encoding, and factorizing variables
+###Completeness of the data
+First of all, I would like to see which variables contain missing values.
+```{r}
+NAcol <- which(colSums(is.na(all)) > 0)
+sort(colSums(sapply(all[NAcol], is.na)), decreasing = TRUE)
+print(NAcol)
+```
+
+```{r}
+cat('There are', length(NAcol), 'columns with missing values')
+```
+
+Of course, the 1459 NAs in SalePrice match the size of the test set perfectly. This means that I have to fix NAs in 34 predictor variables.
+
+##Imputing missing data
+Pool Quality and the PoolArea variable
+
+The PoolQC is the variable with most NAs. The description is as follows:
+
+PoolQC: Pool quality
+
+   Ex   Excellent
+   Gd   Good
+   TA   Average/Typical
+   Fa   Fair
+   NA   No Pool
+   
+So, it is obvious that I need to just assign ‘No Pool’ to the NAs. Also, the high number of NAs makes sense as normally only a small proportion of houses have a pool.
+```{r}
+all$PoolQC[is.na(all$PoolQC)] <- 'None'
+```
+
+It is also clear that I can label encode this variable as the values are ordinal. As there a multiple variables that use the same quality levels, I am going to create a vector that I can reuse later on.
+
+```{r}
+Qualities <- c('None' = 0, 'Po' = 1, 'Fa' = 2, 'TA' = 3, 'Gd' = 4, 'Ex' = 5)
+```
+
+Now, I can use the function ‘revalue’ to do the work for me.
+
+```{r}
+all$PoolQC<-as.integer(revalue(all$PoolQC, Qualities))
+table(all$PoolQC)
+```
+
+However, there is a second variable that relates to Pools. This is the PoolArea variable (in square feet). As you can see below, there are 3 houses without PoolQC. First, I checked if there was a clear relation between the PoolArea and the PoolQC. As I did not see a clear relation (bigger of smaller pools with better PoolQC), I am going to impute PoolQC values based on the Overall Quality of the houses (which is not very high for those 3 houses).
+
+```{r}
+all[all$PoolArea>0 & all$PoolQC==0, c('PoolArea', 'PoolQC', 'OverallQual')]
+```
+
+```{r}
+all$PoolQC[2421] <- 2
+all$PoolQC[2504] <- 3
+all$PoolQC[2600] <- 2
+```
+
+##Miscellaneous Feature
+###Miscellaneous feature not covered in other categories
+Within Miscellaneous Feature, there are 2814 NAs. As the values are not ordinal, I will convert MiscFeature into a factor. Values:
+   Elev Elevator
+   Gar2 2nd Garage (if not described in garage section)
+   Othr Other
+   Shed Shed (over 100 SF)
+   TenC Tennis Court
+   NA   None
+   
+```{r}
+all$MiscFeature[is.na(all$MiscFeature)] <- 'None'
+all$MiscFeature <- as.factor(all$MiscFeature)
+
+ggplot(all[!is.na(all$SalePrice),], aes(x=MiscFeature, y=SalePrice)) +
+        geom_bar(stat='summary', fun.y = "median", fill='blue') +
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..))
+```
+
+```{r}
+table(all$MiscFeature)
+```
+
+When looking at the frequencies, the variable seems irrelevant to me. Having a shed probably means ‘no Garage’, which would explain the lower sales price for Shed. Also, while it makes a lot of sense that a house with a Tennis court is expensive, there is only one house with a tennis court in the training set.
+
+##Alley
+###Type of alley access to property
+Within Alley, there are 2721 NAs. As the values are not ordinal, I will convert Alley into a factor. Values:
+   Grvl Gravel
+   Pave Paved
+   NA   No alley access
+   
+```{r}
+all$Alley[is.na(all$Alley)] <- 'None'
+all$Alley <- as.factor(all$Alley)
+print(all$Alley)
+ggplot(all[!is.na(all$SalePrice),], aes(x=Alley, y=SalePrice)) +
+        geom_bar(stat='summary', fun.y = "median", fill='blue')+
+        scale_y_continuous(breaks= seq(0, 200000, by=50000), labels = comma)
+```
+
+```{r}
+table(all$Alley)
+```
+
+##Fence
+###Fence quality
+Within Fence, there are 2348 NAs. The values seem to be ordinal. Values:
+   GdPrv    Good Privacy
+   MnPrv    Minimum Privacy
+   GdWo Good Wood
+   MnWw Minimum Wood/Wire
+   NA   No Fence
+  
+```{r}
+all$Fence[is.na(all$Fence)] <- 'None'
+table(all$Fence)
+```
+
+```{r}
+all[!is.na(all$SalePrice),] %>% group_by(Fence) %>% summarise(median = median(SalePrice), counts=n())
+```
+
+My conclusion is that the values do not seem ordinal (no fence is best). Therefore, I will convert Fence into a factor.
+
+```{r}
+all$Fence <- as.factor(all$Fence)
+```
+
+##Fireplace variables
+###Fireplace quality, and Number of fireplaces
+Within Fireplace Quality, there are 1420 NAs. Number of fireplaces is complete.
+Fireplace quality
+The number of NAs in FireplaceQu matches the number of houses with 0 fireplaces. This means that I can safely replace the NAs in FireplaceQu with ‘no fireplace’. The values are ordinal, and I can use the Qualities vector that I have already created for the Pool Quality. Values:
+   Ex   Excellent - Exceptional Masonry Fireplace
+   Gd   Good - Masonry Fireplace in main level
+   TA   Average - Prefabricated Fireplace in main living area or Masonry Fireplace in basement
+   Fa   Fair - Prefabricated Fireplace in basement
+   Po   Poor - Ben Franklin Stove
+   NA   No Fireplace
+  
+```{r}
+all$FireplaceQu[is.na(all$FireplaceQu)] <- 'None'
+all$FireplaceQu<-as.integer(revalue(all$FireplaceQu, Qualities))
+table(all$FireplaceQu)
+```
+
+Number of fireplaces
+Fireplaces is an integer variable, and there are no missing values.
+
+```{r}
+table(all$Fireplaces)
+```
+
+```{r}
+sum(table(all$Fireplaces))
+```
+
+##Lot variables
+3 variables. One with 1 NA, and 2 complete variables.
+LotFrontage: Linear feet of street connected to property
+486 NAs. The most reasonable imputation seems to take the median per neigborhood.
+
+```{r}
+ggplot(all[!is.na(all$LotFrontage),], aes(x=as.factor(Neighborhood), y=LotFrontage)) +
+        geom_bar(stat='summary', fun.y = "median", fill='blue') +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+for (i in 1:nrow(all)){
+        if(is.na(all$LotFrontage[i])){
+               all$LotFrontage[i] <- as.integer(median(all$LotFrontage[all$Neighborhood==all$Neighborhood[i]], na.rm=TRUE)) 
+        }
+}
+```
+
+LotShape: General shape of property
+No NAs. Values seem ordinal (Regular=best)
+   Reg  Regular 
+   IR1  Slightly irregular
+   IR2  Moderately Irregular
+   IR3  Irregular
+   
+```{r}
+all$LotShape<-as.integer(revalue(all$LotShape, c('IR3'=0, 'IR2'=1, 'IR1'=2, 'Reg'=3)))
+table(all$LotShape)
+```
+
+```{r}
+sum(table(all$LotShape))
+```
+
+###LotConfig: Lot configuration
+No NAs. The values seemed possibly ordinal to me, but the visualization does not show this. Therefore, I will convert the variable into a factor.
+   Inside   Inside lot
+   Corner   Corner lot
+   CulDSac  Cul-de-sac
+   FR2  Frontage on 2 sides of property
+   FR3  Frontage on 3 sides of property
+   
+```{r}
+ggplot(all[!is.na(all$SalePrice),], aes(x=as.factor(LotConfig), y=SalePrice)) +
+        geom_bar(stat='summary', fun.y = "median", fill='blue')+
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..))
+```
+
+```{r}
+all$LotConfig <- as.factor(all$LotConfig)
+table(all$LotConfig)
+```
+
+```{r}
+sum(table(all$LotConfig))
+```
+
+##Garage variables
+###Altogether, there are 7 variables related to garages
+Two of those have one NA (GarageCars and GarageArea), one has 157 NAs (GarageType), 4 variables have 159 NAs.
+First of all, I am going to replace all 159 missing GarageYrBlt: Year garage was built values with the values in YearBuilt (this is similar to YearRemodAdd, which also defaults to YearBuilt if no remodeling or additions).
+
+```{r}
+all$GarageYrBlt[is.na(all$GarageYrBlt)] <- all$YearBuilt[is.na(all$GarageYrBlt)]
+```
+
+As NAs mean ‘No Garage’ for character variables, I now want to find out where the differences between the 157 NA GarageType and the other 3 character variables with 159 NAs come from.
+#check if all 157 NAs are the same observations among the variables with 157/159 NAs
+
+```{r}
+length(which(is.na(all$GarageType) & is.na(all$GarageFinish) & is.na(all$GarageCond) & is.na(all$GarageQual)))
+```
+
+```{r}
+#Find the 2 additional NAs
+kable(all[!is.na(all$GarageType) & is.na(all$GarageFinish), c('GarageCars', 'GarageArea', 'GarageType', 'GarageCond', 'GarageQual', 'GarageFinish')])
+```
+
+The 157 NAs within GarageType all turn out to be NA in GarageCondition, GarageQuality, and GarageFinish as well. The differences are found in houses 2127 and 2577. As you can see, house 2127 actually does seem to have a Garage and house 2577 does not. Therefore, there should be 158 houses without a Garage. To fix house 2127, I will imputate the most common values (modes) for GarageCond, GarageQual, and GarageFinish.
+
+```{r}
+#Imputing modes.
+all$GarageCond[2127] <- names(sort(-table(all$GarageCond)))[1]
+all$GarageQual[2127] <- names(sort(-table(all$GarageQual)))[1]
+all$GarageFinish[2127] <- names(sort(-table(all$GarageFinish)))[1]
+
+#display "fixed" house
+kable(all[2127, c('GarageYrBlt', 'GarageCars', 'GarageArea', 'GarageType', 'GarageCond', 'GarageQual', 'GarageFinish')])
+```
+
+GarageCars and GarageArea: Size of garage in car capacity and Size of garage in square
+Both have 1 NA. As you can see above, it is house 2577 for both variables. The problem probably occured as the GarageType for this house is “detached”, while all other Garage-variables seem to indicate that this house has no Garage.
+
+```{r}
+#fixing 3 values for house 2577
+all$GarageCars[2577] <- 0
+all$GarageArea[2577] <- 0
+all$GarageType[2577] <- NA
+#check if NAs of the character variables are now all 158
+length(which(is.na(all$GarageType) & is.na(all$GarageFinish) & is.na(all$GarageCond) & is.na(all$GarageQual)))
+```
+
+Now, the 4 character variables related to garage all have the same set of 158 NAs, which correspond to ‘No Garage’. I will fix all of them in the remainder of this section
+##GarageType: Garage location
+The values do not seem ordinal, so I will convert into a factor.
+   2Types   More than one type of garage
+   Attchd   Attached to home
+   Basment  Basement Garage
+   BuiltIn  Built-In (Garage part of house - typically has room above garage)
+   CarPort  Car Port
+   Detchd   Detached from home
+   NA   No Garage
+   
+```{r}
+all$GarageType[is.na(all$GarageType)] <- 'No Garage'
+all$GarageType <- as.factor(all$GarageType)
+table(all$GarageType)
+```
+
+##GarageFinish: Interior finish of the garage
+The values are ordinal.
+   Fin  Finished
+   RFn  Rough Finished  
+   Unf  Unfinished
+   NA   No Garage
+  
+```{r}
+all$GarageFinish[is.na(all$GarageFinish)] <- 'None'
+Finish <- c('None'=0, 'Unf'=1, 'RFn'=2, 'Fin'=3)
+
+all$GarageFinish<-as.integer(revalue(all$GarageFinish, Finish))
+table(all$GarageFinish)
+```
+
+##GarageQual: Garage quality
+Another variable than can be made ordinal with the Qualities vector.
+   Ex   Excellent
+   Gd   Good
+   TA   Typical/Average
+   Fa   Fair
+   Po   Poor
+   NA   No Garage
+   
+```{r}
+all$GarageQual[is.na(all$GarageQual)] <- 'None'
+all$GarageQual<-as.integer(revalue(all$GarageQual, Qualities))
+table(all$GarageQual)
+```
+
+GarageCond: Garage condition
+Another variable than can be made ordinal with the Qualities vector.
+   Ex   Excellent
+   Gd   Good
+   TA   Typical/Average
+   Fa   Fair
+   Po   Poor
+   NA   No Garage
+   
+```{r}
+all$GarageCond[is.na(all$GarageCond)] <- 'None'
+all$GarageCond<-as.integer(revalue(all$GarageCond, Qualities))
+table(all$GarageCond)
+```
+
+##Basement Variables
+Altogether, there are 11 variables that relate to the Basement of a house
+Five of those have 79-82 NAs, six have one or two NAs.
+
+```{r}
+#check if all 79 NAs are the same observations among the variables with 80+ NAs
+length(which(is.na(all$BsmtQual) & is.na(all$BsmtCond) & is.na(all$BsmtExposure) & is.na(all$BsmtFinType1) & is.na(all$BsmtFinType2)))
+```
+
+```{r}
+#Find the additional NAs; BsmtFinType1 is the one with 79 NAs
+all[!is.na(all$BsmtFinType1) & (is.na(all$BsmtCond)|is.na(all$BsmtQual)|is.na(all$BsmtExposure)|is.na(all$BsmtFinType2)), c('BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2')]
+```
+
+So altogether, it seems as if there are 79 houses without a basement, because the basement variables of the other houses with missing values are all 80% complete (missing 1 out of 5 values). I am going to impute the modes to fix those 9 houses.
+
+```{r}
+#Imputing modes.
+all$BsmtFinType2[333] <- names(sort(-table(all$BsmtFinType2)))[1]
+all$BsmtExposure[c(949, 1488, 2349)] <- names(sort(-table(all$BsmtExposure)))[1]
+all$BsmtCond[c(2041, 2186, 2525)] <- names(sort(-table(all$BsmtCond)))[1]
+all$BsmtQual[c(2218, 2219)] <- names(sort(-table(all$BsmtQual)))[1]
+```
+
+Now that the 5 variables considered agree upon 79 houses with ‘no basement’, I am going to factorize/hot encode them below.
+
+##BsmtQual: Evaluates the height of the basement
+A variable than can be made ordinal with the Qualities vector.
+   Ex   Excellent (100+ inches) 
+   Gd   Good (90-99 inches)
+   TA   Typical (80-89 inches)
+   Fa   Fair (70-79 inches)
+   Po   Poor (<70 inches
+   NA   No Basement
+   
+```{r}
+all$BsmtQual[is.na(all$BsmtQual)] <- 'None'
+all$BsmtQual<-as.integer(revalue(all$BsmtQual, Qualities))
+table(all$BsmtQual)
+```
+ 
+## BsmtCond: Evaluates the general condition of the basement
+A variable than can be made ordinal with the Qualities vector.
+   Ex   Excellent
+   Gd   Good
+   TA   Typical - slight dampness allowed
+   Fa   Fair - dampness or some cracking or settling
+   Po   Poor - Severe cracking, settling, or wetness
+   NA   No Basement
+
+```{r}
+all$BsmtCond[is.na(all$BsmtCond)] <- 'None'
+all$BsmtCond<-as.integer(revalue(all$BsmtCond, Qualities))
+table(all$BsmtCond)
+```
+
+##BsmtExposure: Refers to walkout or garden level walls
+A variable than can be made ordinal.
+   Gd   Good Exposure
+   Av   Average Exposure (split levels or foyers typically score average or above)  
+   Mn   Mimimum Exposure
+   No   No Exposure
+   NA   No Basement
+   
+```{r}
+all$BsmtExposure[is.na(all$BsmtExposure)] <- 'None'
+Exposure <- c('None'=0, 'No'=1, 'Mn'=2, 'Av'=3, 'Gd'=4)
+all$BsmtExposure<-as.integer(revalue(all$BsmtExposure, Exposure))
+table(all$BsmtExposure)
+```
+   
+## BsmtFinType1: Rating of basement finished area
+A variable than can be made ordinal.
+   GLQ  Good Living Quarters
+   ALQ  Average Living Quarters
+   BLQ  Below Average Living Quarters   
+   Rec  Average Rec Room
+   LwQ  Low Quality
+   Unf  Unfinshed
+   NA   No Basement
+   
+```{r}
+all$BsmtFinType1[is.na(all$BsmtFinType1)] <- 'None'
+FinType <- c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)
+
+all$BsmtFinType1<-as.integer(revalue(all$BsmtFinType1, FinType))
+table(all$BsmtFinType1)
+```
+   
+## BsmtFinType2: Rating of basement finished area (if multiple types)
+A variable than can be made ordinal with the FinType vector.
+   GLQ  Good Living Quarters
+   ALQ  Average Living Quarters
+   BLQ  Below Average Living Quarters   
+   Rec  Average Rec Room
+   LwQ  Low Quality
+   Unf  Unfinshed
+   NA   No Basement
+   
+```{r}
+all$BsmtFinType2[is.na(all$BsmtFinType2)] <- 'None'
+FinType <- c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)
+
+all$BsmtFinType2<-as.integer(revalue(all$BsmtFinType2, FinType))
+table(all$BsmtFinType2)
+```
+
+##Remaining Basement variabes with just a few NAs
+I now still have to deal with those 6 variables that have 1 or 2 NAs.
+
+```{r}
+#display remaining NAs. Using BsmtQual as a reference for the 79 houses without basement agreed upon earlier
+all[(is.na(all$BsmtFullBath)|is.na(all$BsmtHalfBath)|is.na(all$BsmtFinSF1)|is.na(all$BsmtFinSF2)|is.na(all$BsmtUnfSF)|is.na(all$TotalBsmtSF)), c('BsmtQual', 'BsmtFullBath', 'BsmtHalfBath', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF', 'TotalBsmtSF')]
+```
+
+It should be obvious that those remaining NAs all refer to ‘not present’. Below, I am fixing those remaining variables.
+
+##BsmtFullBath: Basement full bathrooms
+An integer variable.
+
+```{r}
+all$BsmtFullBath[is.na(all$BsmtFullBath)] <-0
+table(all$BsmtFullBath)
+```
+
+## BsmtHalfBath: Basement half bathrooms
+An integer variable.
+
+```{r}
+all$BsmtHalfBath[is.na(all$BsmtHalfBath)] <-0
+table(all$BsmtHalfBath)
+```
+
+##BsmtFinSF1: Type 1 finished square feet
+An integer variable.
+
+```{r}
+all$BsmtFinSF1[is.na(all$BsmtFinSF1)] <-0
+```
+
+BsmtFinSF2: Type 2 finished square feet
+An integer variable.
+```{r}
+all$BsmtFinSF2[is.na(all$BsmtFinSF2)] <-0
+```
+
+##BsmtUnfSF: Unfinished square feet of basement area
+An integer variable.
+
+```{r}
+all$BsmtUnfSF[is.na(all$BsmtUnfSF)] <-0
+```
+
+##TotalBsmtSF: Total square feet of basement area
+An integer variable.
+
+```{r}
+all$TotalBsmtSF[is.na(all$TotalBsmtSF)] <-0
+```
+
+##Masonry variables
+Masonry veneer type, and masonry veneer area
+Masonry veneer type has 24 NAs. Masonry veneer area has 23 NAs. If a house has a veneer area, it should also have a masonry veneer type. Let’s fix this one first.
+
+```{r}
+#check if the 23 houses with veneer area NA are also NA in the veneer type
+length(which(is.na(all$MasVnrType) & is.na(all$MasVnrArea)))
+```
+
+```{r}
+#find the one that should have a MasVnrType
+all[is.na(all$MasVnrType) & !is.na(all$MasVnrArea), c('MasVnrType', 'MasVnrArea')]
+```
+
+```{r}
+#fix this veneer type by imputing the mode
+all$MasVnrType[2611] <- names(sort(-table(all$MasVnrType)))[2] #taking the 2nd value as the 1st is 'none'
+all[2611, c('MasVnrType', 'MasVnrArea')]
+```
+
+This leaves me with 23 houses that really have no masonry.
+
+##Masonry veneer type
+Will check the ordinality below.
+   BrkCmn   Brick Common
+   BrkFace  Brick Face
+   CBlock   Cinder Block
+   None None
+   Stone    Stone
+   
+```{r}
+all$MasVnrType[is.na(all$MasVnrType)] <- 'None'
+all[!is.na(all$SalePrice),] %>% group_by(MasVnrType) %>% summarise(median = median(SalePrice), counts=n()) %>% arrange(median)
+```
+
+
+There seems to be a significant difference between “common brick/none” and the other types. I assume that simple stones and for instance wooden houses are just cheaper. I will make the ordinality accordingly.
+
+```{r}
+Masonry <- c('None'=0, 'BrkCmn'=0, 'BrkFace'=1, 'Stone'=2)
+all$MasVnrType<-as.integer(revalue(all$MasVnrType, Masonry))
+table(all$MasVnrType)
+```
+
+##MasVnrArea: Masonry veneer area in square feet
+An integer variable.
+
+```{r}
+all$MasVnrArea[is.na(all$MasVnrArea)] <-0
+```
+
+MS Zoning
+MSZoning: Identifies the general zoning classification of the sale
+4 NAs. Values are categorical.
+   A    Agriculture
+   C    Commercial
+   FV   Floating Village Residential
+   I    Industrial
+   RH   Residential High Density
+   RL   Residential Low Density
+   RP   Residential Low Density Park 
+   RM   Residential Medium Density
+   
+```{r}
+#imputing the mode
+all$MSZoning[is.na(all$MSZoning)] <- names(sort(-table(all$MSZoning)))[1]
+all$MSZoning <- as.factor(all$MSZoning)
+table(all$MSZoning)
+```
+
+```{r}
+sum(table(all$MSZoning))
+```
+##Kitchen variables
+Kitchen quality and numer of Kitchens above grade
+Kitchen quality has 1 NA. Number of Kitchens is complete.
+Kitchen quality
+1NA. Can be made ordinal with the qualities vector.
+   Ex   Excellent
+   Gd   Good
+   TA   Typical/Average
+   Fa   Fair
+   Po   Poor
+```{r}
+all$KitchenQual[is.na(all$KitchenQual)] <- 'TA' #replace with most common value
+all$KitchenQual<-as.integer(revalue(all$KitchenQual, Qualities))
+table(all$KitchenQual)
+```
+
+```{r}
+sum(table(all$KitchenQual))
+```
+
+##Number of Kitchens above grade
+An integer variable with no NAs.
+
+```{r}
+table(all$KitchenAbvGr)
+```
+
+```{r}
+sum(table(all$KitchenAbvGr))
+```
+
+##Utilities
+Utilities: Type of utilities available
+2 NAs. Ordinal as additional utilities is better.
+   AllPub   All public Utilities (E,G,W,& S)    
+   NoSewr   Electricity, Gas, and Water (Septic Tank)
+   NoSeWa   Electricity and Gas Only
+   ELO  Electricity only
+However, the table below shows that only one house does not have all public utilities. This house is in the train set. Therefore, imputing ‘AllPub’ for the NAs means that all houses in the test set will have ‘AllPub’. This makes the variable useless for prediction. Consequently, I will get rid of it.
+
+
+```{r}
+table(all$Utilities)
+```
+
+```{r}
+kable(all[is.na(all$Utilities) | all$Utilities=='NoSeWa', 1:9])
+all$Utilities <- NULL
+```
+
+
+
+##Home functionality
+Functional: Home functionality
+1NA. Can be made ordinal (salvage only is worst, typical is best).
+   Typ  Typical Functionality
+   Min1 Minor Deductions 1
+   Min2 Minor Deductions 2
+   Mod  Moderate Deductions
+   Maj1 Major Deductions 1
+   Maj2 Major Deductions 2
+   Sev  Severely Damaged
+   Sal  Salvage only
+   
+```{r}
+#impute mode for the 1 NA
+all$Functional[is.na(all$Functional)] <- names(sort(-table(all$Functional)))[1]
+
+all$Functional <- as.integer(revalue(all$Functional, c('Sal'=0, 'Sev'=1, 'Maj2'=2, 'Maj1'=3, 'Mod'=4, 'Min2'=5, 'Min1'=6, 'Typ'=7)))
+table(all$Functional)
+```
+
+```{r}
+sum(table(all$Functional))
 ```
 
